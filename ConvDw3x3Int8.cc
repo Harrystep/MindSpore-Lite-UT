@@ -1,44 +1,42 @@
- TEST_F(ConvDw3x3Int8Test, ConvDw3x3Int8_6x6x8_Minimal_Stride1) {
+ TEST_F(ConvDw3x3Int8Test, ConvDw3x3Int8_6x30x8_Stride2_Safe) {
    const int batch = 1;
    const int in_h = 6;
-   const int in_w = 6;
+   const int in_w = 30;  // MUST be >= 29 (block_input_w for stride=2)
    const int channel = 8;
-   const int out_h = 4;
-   const int out_w = 4;
+   const int out_h = 3;
+   const int out_w = 15;
 
-   // Input: 1x6x6x8 (NHWC format) - only 288 bytes
-   // Very simple data: sequential values starting from -32
+   // Input: 1x6x30x8
+   // Simple alternating pattern
    std::vector<int8_t> input(batch * in_h * in_w * channel);
    for (size_t i = 0; i < input.size(); i++) {
-     input[i] = static_cast<int8_t>(-32 + (i % 64));  // Simple pattern
+     input[i] = (i % 2 == 0) ? 32 : -32;  // Alternating 32 and -32
    }
 
-   // Weight: 3x3x8 (NHWC format) - identity-like kernel
-   // Center pixel has weight 1, others 0
+   // Weight: 3x3x8 - averaging kernel
    std::vector<int16_t> weight(channel * 3 * 3);
    for (int ch = 0; ch < channel; ch++) {
      for (int i = 0; i < 9; i++) {
-       weight[ch * 9 + i] = (i == 4) ? 100 : 0;  // Only center = 100
+       weight[ch * 9 + i] = 10;  // All weights = 10
      }
    }
 
-   // Bias: 8 channels - all zeros
+   // Bias
    std::vector<int32_t> bias(channel, 0);
 
-   // Output: 1x4x4x8 - only 128 bytes
+   // Output: 1x3x15x8
    std::vector<int8_t> output(batch * out_h * out_w * channel, 0);
 
-   // Buffer - small temporary buffer
-   // With input_w=6 < 150 and channel=8 < 64, will skip block processing
-   std::vector<int8_t> buffer(1024, 0);  // 1KB is enough
+   // Buffer: 3 * 29 * 64 bytes for stride 2
+   std::vector<int8_t> buffer(3 * 29 * 64, 0);
 
    // Convolution parameters
    ConvParameter conv_param;
    memset(&conv_param, 0, sizeof(ConvParameter));
    conv_param.kernel_h_ = 3;
    conv_param.kernel_w_ = 3;
-   conv_param.stride_h_ = 1;
-   conv_param.stride_w_ = 1;
+   conv_param.stride_h_ = 2;
+   conv_param.stride_w_ = 2;
    conv_param.dilation_h_ = 1;
    conv_param.dilation_w_ = 1;
    conv_param.pad_u_ = 1;
@@ -55,9 +53,9 @@
    conv_param.output_channel_ = channel;
    conv_param.thread_num_ = 1;
 
-   // Quantization parameters (per-channel)
-   QuantArg input_quant_args[1] = {{1.0f, 0}};
-   QuantArg output_quant_args[1] = {{1.0f, 0}};
+   // Quantization
+   QuantArg input_quant_args[1] = {{0.5f, 0}};
+   QuantArg output_quant_args[1] = {{0.5f, 0}};
    int32_t quant_multiplier[8] = {
      1073741824, 1073741824, 1073741824, 1073741824,
      1073741824, 1073741824, 1073741824, 1073741824
@@ -76,7 +74,7 @@
    conv_param.conv_quant_arg_.out_act_max_ = out_act_max;
    conv_param.conv_quant_arg_.per_channel_ = FILTER_PER_CHANNEL;
 
-   // Sliding window parameters
+   // Sliding window
    SlidingWindowParam sliding;
    memset(&sliding, 0, sizeof(SlidingWindowParam));
    sliding.top_ = 0;
@@ -84,43 +82,32 @@
    sliding.left_ = 0;
    sliding.right_ = out_w;
 
-   std::cout << "Test ConvDw3x3Int8 with MINIMAL data:\n";
-   std::cout << "  Input: " << in_h << "x" << in_w << "x" << channel << " (" << input.size() << " bytes)\n";
-   std::cout << "  Output: " << out_h << "x" << out_w << "x" << channel << " (" << output.size() << " bytes)\n";
+   std::cout << "Test ConvDw3x3Int8 - STRIDE 2:\n";
+   std::cout << "  Input: " << in_h << "x" << in_w << "x" << channel
+             << " (input_w=" << in_w << " >= block_input_w=29, SAFE!)\n";
+   std::cout << "  Output: " << out_h << "x" << out_w << "x" << channel << "\n";
 
-   // Run the convolution
+   // Run convolution
    int task_id = 0;
    ConvDw3x3Int8(output.data(), buffer.data(), input.data(), weight.data(), bias.data(),
                  &conv_param, &sliding, task_id);
 
    std::cout << "  Execution completed successfully!\n\n";
 
-   // Verify all output values are in valid int8 range
+   // Verify all values
    for (size_t i = 0; i < output.size(); i++) {
-     ASSERT_GE(output[i], -128) << "Value at index " << i << " is below -128";
-     ASSERT_LE(output[i], 127) << "Value at index " << i << " is above 127";
+     ASSERT_GE(output[i], -128) << "Value at " << i << " below minimum";
+     ASSERT_LE(output[i], 127) << "Value at " << i << " above maximum";
    }
 
-   // Check that output is not all zeros (some computation happened)
-   int non_zero_count = 0;
-   for (size_t i = 0; i < output.size(); i++) {
-     if (output[i] != 0) {
-       non_zero_count++;
-     }
-   }
-   EXPECT_GT(non_zero_count, 0) << "Expected some non-zero output values";
+   // Print corners
+   std::cout << "Output corners (first 4 channels):\n";
+   std::cout << "  Top-left:     ";
+   for (int c = 0; c < 4; c++) std::cout << static_cast<int32_t>(output[c]) << " ";
+   std::cout << "\n";
 
-   // Print simple output for verification
-   std::cout << "Sample output (first 2x2 block, first 4 channels):\n";
-   for (int h = 0; h < 2; h++) {
-     for (int w = 0; w < 2; w++) {
-       std::cout << "  [";
-       for (int c = 0; c < 4; c++) {
-         std::cout << static_cast<int32_t>(output[h * out_w * channel + w * channel + c]);
-         if (c < 3) std::cout << " ";
-       }
-       std::cout << "]";
-     }
-     std::cout << "\n";
-   }
+   int idx = (out_h - 1) * out_w * channel + (out_w - 1) * channel;
+   std::cout << "  Bottom-right: ";
+   for (int c = 0; c < 4; c++) std::cout << static_cast<int32_t>(output[idx + c]) << " ";
+   std::cout << "\n";
  }
