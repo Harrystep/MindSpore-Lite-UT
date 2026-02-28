@@ -105,8 +105,9 @@ TEST_F(LstmFp32Test, Testcase02) {
   std::for_each(input_c.begin(), input_c.end(), [](float value) { std::cout << value << " "; });
   float sim_y = get_cosine_similarity(output_y.data(), benchmark_y.data(), output_y_shape);
   float sim_h = get_cosine_similarity(input_h.data(), benchmark_h.data(), output_h_shape);
-  float sim_h = get_cosine_similarity(input_c.data(), benchmark_c.data(), output_c_shape);
+  float sim_c = get_cosine_similarity(input_c.data(), benchmark_c.data(), output_c_shape);
   ASSERT_GT(sim_y, 0.99);
   ASSERT_GT(sim_h, 0.99);
   ASSERT_GT(sim_c, 0.99);
 }
+
